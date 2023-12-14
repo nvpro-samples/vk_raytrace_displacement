@@ -1,0 +1,147 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#version 460
+#extension GL_GOOGLE_include_directive : enable
+#extension GL_EXT_shader_explicit_arithmetic_types : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_int32 : enable
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : enable
+
+#include "animate_heightmap.h"
+
+layout(local_size_x = ANIMATION_WORKGROUP_SIZE, local_size_y = ANIMATION_WORKGROUP_SIZE) in;
+layout(set = 0, binding = BINDING_ANIM_IMAGE_A_HEIGHT, r32f) uniform image2D heightmapA;
+layout(set = 0, binding = BINDING_ANIM_IMAGE_B_HEIGHT, r32f) uniform image2D heightmapB;
+layout(set = 0, binding = BINDING_ANIM_IMAGE_A_VELOCITY, r32f) uniform image2D velocityA;
+layout(set = 0, binding = BINDING_ANIM_IMAGE_B_VELOCITY, r32f) uniform image2D velocityB;
+layout(push_constant) uniform CompressPushConstants_
+{
+  AnimatePushConstants pc;
+};
+
+float heightRead(ivec2 coord)
+{
+  float value = pc.writeToA != 0 ? imageLoad(heightmapB, coord).r : imageLoad(heightmapA, coord).r;
+  return (value - HEIGHTMAP_OFFSET) * HEIGHTMAP_RANGE;
+}
+
+float velocityRead(ivec2 coord)
+{
+  return (pc.writeToA != 0 ? imageLoad(velocityB, coord).r : imageLoad(velocityA, coord).r);
+}
+
+void heightWrite(ivec2 coord, float value)
+{
+  if(pc.writeToA != 0)
+    imageStore(heightmapA, coord, vec4(value / HEIGHTMAP_RANGE + HEIGHTMAP_OFFSET));
+  else
+    imageStore(heightmapB, coord, vec4(value / HEIGHTMAP_RANGE + HEIGHTMAP_OFFSET));
+}
+
+void velocityWrite(ivec2 coord, float value)
+{
+  if(pc.writeToA != 0)
+    imageStore(velocityA, coord, vec4(value));
+  else
+    imageStore(velocityB, coord, vec4(value));
+}
+
+void main()
+{
+  ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+
+  // Read the central heights
+  float height       = heightRead(coord);
+  float velocity     = velocityRead(coord);
+
+  // Small convolution kernel to find neighboring water height. Using shared
+  // memory would make this faster.
+  const int radius = 2;
+  float totalWeight       = 0;
+  float neighbourVelocity = 0;
+  float neighbourHeight   = 0;
+  ivec2 offset;
+  for(offset.x = -radius; offset.x <= radius; ++offset.x)
+  {
+    for(offset.y = -radius; offset.y <= radius; ++offset.y)
+    {
+      if(offset == vec2(0))
+        continue;
+
+      ivec2 sampleCoord = coord + offset;
+      float weight      = 1.0 / (1.0 + dot(vec2(offset), vec2(offset)));  // pulled out of nowhere
+      totalWeight += weight;
+
+      if(sampleCoord.x < 0 || sampleCoord.y < 0 || sampleCoord.x >= pc.resolution || sampleCoord.y >= pc.resolution)
+        continue;
+
+      neighbourVelocity += velocityRead(sampleCoord) * weight;
+      neighbourHeight += heightRead(sampleCoord) * weight;
+    }
+  }
+  neighbourVelocity /= totalWeight;
+  neighbourHeight /= totalWeight;
+
+  // Artificially accelerate towards height == 0. Keeps the water height around
+  // zero. Seems to act a bit like increasing gravity, producing faster
+  // oscillations.
+  neighbourHeight *= 0.998;
+
+  // Raise the water height with the mouse
+  float penRadius   = 4.0;  // pixels
+  float penPower    = 0.3;  // 1 forces the level to the floor
+  float penDistance = length(pc.mouse - vec2(coord));
+  float penShape    = smoothstep(penRadius - 1.0, penRadius, penDistance);
+  if(penDistance < penRadius)
+  {
+    // Indirectly adjusting the height produces a smoother result because the
+    // water height naturally accelerates towards the neighbour heights.
+    neighbourHeight = min(neighbourHeight, penShape - HEIGHTMAP_RANGE * 0.5 * penPower);
+  }
+
+  // Loosely based on: [Mueller, Matthias] "Fast Water Simulation for Games Using Height Fields, GDC2008"
+  float dt = pc.deltaTime;
+  float h = 1.0 / pc.resolution; // column width
+  float c = 0.1 * h / dt; // speed waves travel
+  float f = c * c * (neighbourHeight - height) * 4.0 / (h * h);
+
+  // Apply a force in the direction of neighboring velocities. For whatever
+  // reason, this greatly improves the stability of the simulation. Maybe it's
+  // just adding more damping? It'd be nice to avoid computing
+  // neighbourVelocity.
+  f += c * c * (neighbourVelocity - velocity) * 4.0 / (h * h);
+
+  // Mid-point integration
+  float dv = f * dt;
+  height += (velocity + dv * 0.5) * dt;
+  velocity += dv;
+
+  // Damping
+  velocity *= 0.999;
+
+  // Set edge heights and velocities to zero for watertightness with base
+  if(coord.x < 1 || coord.y < 1 || coord.x >= pc.resolution - 1 || coord.y >= pc.resolution - 1)
+  {
+    height   = 0.0;
+    velocity = 0.0;
+  }
+
+  heightWrite(coord, height);
+  velocityWrite(coord, velocity);
+}
