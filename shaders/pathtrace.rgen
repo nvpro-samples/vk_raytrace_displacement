@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2022-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2022-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -23,8 +23,8 @@
 #include "device_host.h"
 #include "payload.h"
 #include "dh_bindings.h"
-#include "nvvkhl/shaders/random.glsl"
-#include "nvvkhl/shaders/constants.glsl"
+#include "nvvkhl/shaders/random.h"
+#include "nvvkhl/shaders/constants.h"
 
 // clang-format off
 layout(location = 0) rayPayloadEXT HitPayload payload;

@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2022-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2022-2024 NVIDIA CORPORATION & AFFILIATES.
  * SPDX-License-Identifier: Apache-2.0
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -37,7 +37,6 @@
 #include <chrono>
 #include <random>
 #include <glm/vec4.hpp>
-#include <glm/detail/type_half.hpp>  // for half float
 #include <vulkan/vulkan_core.h>
 
 #define VMA_IMPLEMENTATION
@@ -57,7 +56,6 @@
 #include "nvvk/raytraceKHR_vk.hpp"
 #include "nvvk/sbtwrapper_vk.hpp"
 #include "nvvk/shaders_vk.hpp"
-#include "nvvk/shadermodulemanager_vk.hpp"
 #include "nvvkhl/alloc_vma.hpp"
 #include "nvvkhl/application.hpp"
 #include "nvvkhl/element_camera.hpp"
@@ -75,9 +73,53 @@
 #include "heightmap_rtx.h"
 #include "raytracing_vk.hpp"
 
-using hvec4 = glm::vec<4, glm::detail::hdata>;
+// Pre-compiled SPIR-V, see CMakeLists.txt
+#include "generated_spirv/animate_heightmap.comp.h"
+#include "generated_spirv/pathtrace.rchit.h"
+#include "generated_spirv/pathtrace.rgen.h"
+#include "generated_spirv/pathtrace.rmiss.h"
 
 #define HEIGHTMAP_RESOLUTION 256
+
+// Move-only VkShaderModule constructed from SPIR-V data
+class ShaderModule
+{
+public:
+  ShaderModule() = default;
+  template <size_t N>
+  ShaderModule(VkDevice device, const uint32_t (&spirv)[N])
+      : m_device(device)
+      , m_module(nvvk::createShaderModule(device, spirv, N * sizeof(uint32_t)))
+  {
+  }
+  ~ShaderModule() { destroy(); }
+  ShaderModule(const ShaderModule& other) = delete;
+  ShaderModule(ShaderModule&& other)
+      : m_device(other.m_device)
+      , m_module(other.m_module)
+  {
+    other.m_module = VK_NULL_HANDLE;
+  }
+  ShaderModule& operator=(const ShaderModule& other) = delete;
+  ShaderModule& operator=(ShaderModule&& other)
+  {
+    destroy();
+    m_module = VK_NULL_HANDLE;
+    std::swap(m_module, other.m_module);
+    m_device = other.m_device;
+    return *this;
+  }
+  operator VkShaderModule() const { return m_module; }
+
+private:
+  void destroy()
+  {
+    if(m_module != VK_NULL_HANDLE)
+      vkDestroyShaderModule(m_device, m_module, nullptr);
+  }
+  VkDevice       m_device = VK_NULL_HANDLE;
+  VkShaderModule m_module = VK_NULL_HANDLE;
+};
 
 // Container to run a compute shader with only a single instance of bindings.
 template <class PushConstants>
@@ -88,6 +130,7 @@ struct SingleComputePipeline
   VkDescriptorPool      descriptorPool{VK_NULL_HANDLE};
   VkPipeline            pipeline{VK_NULL_HANDLE};
   VkPipelineLayout      pipelineLayout{VK_NULL_HANDLE};
+  ShaderModule          shaderModule;
 
   // Slightly ugly callback for declaring and writing shader bindings, allowing
   // this class to be more generic. A better way would be to split up the object
@@ -98,8 +141,10 @@ struct SingleComputePipeline
     std::function<std::vector<VkWriteDescriptorSet>(nvvk::DescriptorSetBindings&, VkDescriptorSet)> create;
   };
 
-  void create(VkDevice device, nvvk::ShaderModuleManager& shaderManager, const BindingsCB& bindingsCB, std::string shaderPath)
+  void create(VkDevice device, const BindingsCB& bindingsCB, ShaderModule&& module)
   {
+    shaderModule = std::move(module);
+
     nvvk::DescriptorSetBindings bindings;
     bindingsCB.declare(bindings);
 
@@ -123,7 +168,7 @@ struct SingleComputePipeline
     VkPipelineShaderStageCreateInfo shaderStageCreate{
         .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
         .stage  = VK_SHADER_STAGE_COMPUTE_BIT,
-        .module = shaderManager.get(shaderManager.createShaderModule(VK_SHADER_STAGE_COMPUTE_BIT, shaderPath)),
+        .module = shaderModule,
         .pName  = "main",
     };
 
@@ -150,18 +195,19 @@ struct SingleComputePipeline
     vkDestroyDescriptorPool(device, descriptorPool, nullptr);
     vkDestroyPipeline(device, pipeline, nullptr);
     vkDestroyPipelineLayout(device, pipelineLayout, nullptr);
+    shaderModule = ShaderModule();
   }
 };
 
 struct AnimatedHeightmap
 {
-  void create(nvvkhl::AllocVma& alloc, nvvk::DebugUtil& dutil, nvvk::ShaderModuleManager& shaderManager, uint32_t resolution)
+  void create(nvvkhl::AllocVma& alloc, nvvk::DebugUtil& dutil, uint32_t resolution)
   {
     m_resolution = resolution;
     createHeightmaps(alloc, dutil);
 
     m_animatePipeline.create(
-        alloc.getDevice(), shaderManager,
+        alloc.getDevice(),
         {[](nvvk::DescriptorSetBindings& bindings) {
            bindings.addBinding(BINDING_ANIM_IMAGE_A_HEIGHT, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT);
            bindings.addBinding(BINDING_ANIM_IMAGE_B_HEIGHT, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT);
@@ -176,7 +222,7 @@ struct AnimatedHeightmap
                bindings.makeWrite(descriptorSet, BINDING_ANIM_IMAGE_B_VELOCITY, &m_velocityB.descriptor),
            };
          }},
-        "animate_heightmap.comp");
+        ShaderModule(alloc.getDevice(), animate_heightmap_comp));
   }
   void destroy(nvvkhl::AllocVma& alloc)
   {
@@ -339,9 +385,8 @@ class RaytracingSample : public nvvkhl::IAppElement
 
   struct PrimitiveMeshVk
   {
-    nvvk::Buffer vertices;    // Buffer of the vertices
-    nvvk::Buffer directions;  // Aggregate vertices with fp16 heightmap direction vectors
-    nvvk::Buffer indices;     // Buffer of the indices
+    nvvk::Buffer vertices;  // Buffer of the vertices
+    nvvk::Buffer indices;   // Buffer of the indices
   };
 
 public:
@@ -370,17 +415,12 @@ public:
     int32_t gct_queue_index = m_app->getContext()->m_queueGCT.familyIndex;
     m_sbt.setup(m_device, gct_queue_index, m_alloc.get(), m_rtProperties);
 
-    m_shaderManager.addDirectory("GLSL_" PROJECT_NAME);  // install destination
-    m_shaderManager.addDirectory("shaders");             // source directory location
-    m_shaderManager.addDirectory(NVPRO_CORE_DIR);        // nvpro_core source directory
-    m_shaderManager.init(m_device, 1, 3);
-
     // Create resources
     createScene();
     createVkBuffers();
     createHrtxPipeline();
     static_assert(HEIGHTMAP_RESOLUTION % ANIMATION_WORKGROUP_SIZE == 0, "currently, resolution must match compute workgroup size");
-    m_heightmap.create(*m_alloc, *m_dutil, m_shaderManager, HEIGHTMAP_RESOLUTION);
+    m_heightmap.create(*m_alloc, *m_dutil, HEIGHTMAP_RESOLUTION);
     const VkDescriptorImageInfo& heightmapHeightDesc = m_heightmap.height().descriptor;  // same for both buffers A/B
     m_heightmapImguiDesc = ImGui_ImplVulkan_AddTexture(heightmapHeightDesc.sampler, heightmapHeightDesc.imageView,
                                                        heightmapHeightDesc.imageLayout);
@@ -570,7 +610,7 @@ public:
     vkCmdUpdateBuffer(cmd, m_bFrameInfo.buffer, 0, sizeof(shaders::FrameInfo), &finfo);
 
     // Update the sky
-    vkCmdUpdateBuffer(cmd, m_bSkyParams.buffer, 0, sizeof(nvvkhl_shaders::ProceduralSkyShaderParameters), &m_skyParams);
+    vkCmdUpdateBuffer(cmd, m_bSkyParams.buffer, 0, sizeof(nvvkhl_shaders::SimpleSkyParameters), &m_skyParams);
 
     // Ray trace
     std::vector<VkDescriptorSet> desc_sets{m_rtSet.getSet()};
@@ -622,7 +662,7 @@ private:
     CameraManip.setLookat({0.5F, 0.2F, 1.0F}, {0.0F, -0.2F, 0.0F}, {0.0F, 1.0F, 0.0F});
 
     // Default Sky values
-    m_skyParams = nvvkhl_shaders::initSkyShaderParameters();
+    m_skyParams = nvvkhl_shaders::initSimpleSkyParameters();
   }
 
 
@@ -651,14 +691,6 @@ private:
     {
       auto& m = m_bMeshes[i];
 
-      // Create fp16 direction vectors
-      std::vector<hvec4> directionsHalfVec4(m_meshes[i].vertices.size());
-      std::transform(m_meshes[i].vertices.begin(), m_meshes[i].vertices.end(), directionsHalfVec4.begin(),
-                     [](const nvh::PrimitiveVertex& vertex) {
-                       return hvec4{glm::detail::toFloat16(vertex.n.x), glm::detail::toFloat16(vertex.n.y),
-                                    glm::detail::toFloat16(vertex.n.z), glm::detail::toFloat16(0.0f)};
-                     });
-
       // Adjust texture coordinates to land exactly on texel centers. This is
       // needed because heightmap_rtx samples the heightmap using GLSL's
       // texture() where pixel values are at texel centers, e.g. {0.5 / width,
@@ -673,9 +705,8 @@ private:
         v.t.y = 1.0f - v.t.y;
       }
 
-      m.vertices   = m_alloc->createBuffer(cmd, m_meshes[i].vertices, rt_usage_flag);
-      m.directions = m_alloc->createBuffer(cmd, directionsHalfVec4, rt_usage_flag);
-      m.indices    = m_alloc->createBuffer(cmd, m_meshes[i].triangles, rt_usage_flag);
+      m.vertices = m_alloc->createBuffer(cmd, m_meshes[i].vertices, rt_usage_flag);
+      m.indices  = m_alloc->createBuffer(cmd, m_meshes[i].triangles, rt_usage_flag);
       m_dutil->DBG_NAME_IDX(m.vertices.buffer, i);
       m_dutil->DBG_NAME_IDX(m.indices.buffer, i);
     }
@@ -686,7 +717,7 @@ private:
     m_dutil->DBG_NAME(m_bFrameInfo.buffer);
 
     // Create the buffer of sky parameters, updated at each frame
-    m_bSkyParams = m_alloc->createBuffer(sizeof(nvvkhl_shaders::ProceduralSkyShaderParameters), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+    m_bSkyParams = m_alloc->createBuffer(sizeof(nvvkhl_shaders::SimpleSkyParameters), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     m_dutil->DBG_NAME(m_bSkyParams.buffer);
 
@@ -752,9 +783,10 @@ private:
                                                  + offsetof(nvh::PrimitiveVertex, t)},
         .textureCoordsFormat = VK_FORMAT_R32G32_SFLOAT,
         .textureCoordsStride = sizeof(nvh::PrimitiveVertex),
-        .directionsBuffer    = {.deviceAddress = nvvk::getBufferDeviceAddress(m_device, mesh.directions.buffer)},
-        .directionsFormat    = VK_FORMAT_R16G16B16A16_SFLOAT,  // possible issue with VK_FORMAT_R32G32B32_SFLOAT?
-        .directionsStride    = sizeof(hvec4),
+        .directionsBuffer    = {.deviceAddress = nvvk::getBufferDeviceAddress(m_device, mesh.vertices.buffer)
+                                                 + offsetof(nvh::PrimitiveVertex, n)},
+        .directionsFormat    = VK_FORMAT_R32G32B32_SFLOAT,
+        .directionsStride    = sizeof(nvh::PrimitiveVertex),
         .heightmapImage      = texture.descriptor,
         .heightmapBias       = -m_settings.heightmapScale * 0.5f,
         .heightmapScale      = m_settings.heightmapScale,
@@ -908,18 +940,20 @@ private:
     stage.pName = "main";  // All the same entry point
 
     // Raygen
-    stage.module = m_shaderManager.get(m_shaderManager.createShaderModule(VK_SHADER_STAGE_RAYGEN_BIT_KHR, "pathtrace.rgen"));
+    m_rtShaderRgen  = ShaderModule(m_device, pathtrace_rgen);
+    stage.module    = m_rtShaderRgen;
     stage.stage     = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
     stages[eRaygen] = stage;
     m_dutil->setObjectName(stage.module, "Raygen");
     // Miss
-    stage.module = m_shaderManager.get(m_shaderManager.createShaderModule(VK_SHADER_STAGE_MISS_BIT_KHR, "pathtrace.rmiss"));
-    stage.stage   = VK_SHADER_STAGE_MISS_BIT_KHR;
-    stages[eMiss] = stage;
+    m_rtShaderRmiss = ShaderModule(m_device, pathtrace_rmiss);
+    stage.module    = m_rtShaderRmiss;
+    stage.stage     = VK_SHADER_STAGE_MISS_BIT_KHR;
+    stages[eMiss]   = stage;
     m_dutil->setObjectName(stage.module, "Miss");
     // Hit Group - Closest Hit
-    stage.module =
-        m_shaderManager.get(m_shaderManager.createShaderModule(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, "pathtrace.rchit"));
+    m_rtShaderRchit     = ShaderModule(m_device, pathtrace_rchit);
+    stage.module        = m_rtShaderRchit;
     stage.stage         = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
     stages[eClosestHit] = stage;
     m_dutil->setObjectName(stage.module, "Closest Hit");
@@ -1011,7 +1045,6 @@ private:
     for(auto& m : m_bMeshes)
     {
       m_alloc->destroy(m.vertices);
-      m_alloc->destroy(m.directions);
       m_alloc->destroy(m.indices);
     }
     m_alloc->destroy(m_bFrameInfo);
@@ -1029,6 +1062,9 @@ private:
     m_rtPipe.destroy(m_device);
 
     m_sbt.destroy();
+    m_rtShaderRgen  = ShaderModule();
+    m_rtShaderRmiss = ShaderModule();
+    m_rtShaderRchit = ShaderModule();
 
     m_rtScratchBuffer.reset();
     m_rtBlas.clear();
@@ -1041,15 +1077,13 @@ private:
   std::unique_ptr<nvvkhl::AllocVma>  m_alloc;
   std::unique_ptr<nvvk::CommandPool> m_staticCommandPool;
 
-  nvvk::ShaderModuleManager m_shaderManager;
-
   glm::vec2                        m_viewSize    = {1, 1};
   VkFormat                         m_colorFormat = VK_FORMAT_R8G8B8A8_UNORM;       // Color format of the image
   VkFormat                         m_depthFormat = VK_FORMAT_X8_D24_UNORM_PACK32;  // Depth format of the depth buffer
   VkClearColorValue                m_clearColor  = {{0.3F, 0.3F, 0.3F, 1.0F}};     // Clear color
   VkDevice                         m_device      = VK_NULL_HANDLE;                 // Convenient
   std::unique_ptr<nvvkhl::GBuffer> m_gBuffer;                                      // G-Buffers: color + depth
-  nvvkhl_shaders::ProceduralSkyShaderParameters m_skyParams{};
+  nvvkhl_shaders::SimpleSkyParameters m_skyParams{};
 
   // GPU scene buffers
   std::vector<PrimitiveMeshVk> m_bMeshes;
@@ -1068,6 +1102,9 @@ private:
   int                          m_frame{0};
 
   VkPhysicalDeviceRayTracingPipelinePropertiesKHR m_rtProperties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR};
+  ShaderModule                                           m_rtShaderRgen;
+  ShaderModule                                           m_rtShaderRmiss;
+  ShaderModule                                           m_rtShaderRchit;
   nvvk::SBTWrapper                                       m_sbt;  // Shader binding table wrapper
   rt::Context                                            m_rtContext;
   std::unique_ptr<rt::ScratchBuffer>                     m_rtScratchBuffer;
@@ -1081,7 +1118,6 @@ private:
 
   HrtxPipeline      m_hrtxPipeline{};
   HrtxMap           m_hrtxMap{};
-  nvvk::Buffer      m_displacementDirections;
   AnimatedHeightmap m_heightmap;
   VkDescriptorSet   m_heightmapImguiDesc = VK_NULL_HANDLE;
   VkCommandBuffer   m_cmdHrtxUpdate      = VK_NULL_HANDLE;

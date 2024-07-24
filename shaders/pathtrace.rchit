@@ -1,5 +1,5 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2022-2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-FileCopyrightText: Copyright (c) 2022-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -39,7 +39,7 @@ hitAttributeEXT vec2 attribs;
 layout(location = 0) rayPayloadInEXT HitPayload payload;
 layout(set = 0, binding = BRtTlas ) uniform accelerationStructureEXT topLevelAS;
 layout(set = 0, binding = BRtFrameInfo) uniform FrameInfo_ { FrameInfo frameInfo; };
-layout(set = 0, binding = BRtSkyParam) uniform SkyInfo_ { ProceduralSkyShaderParameters skyInfo; };
+layout(set = 0, binding = BRtSkyParam) uniform SkyInfo_ { SimpleSkyParameters skyInfo; };
 layout(push_constant) uniform RtxPushConstant_ { PushConstant pc; };
 // clang-format on
 

@@ -58,12 +58,6 @@ regard to correctness is that direction vectors are not normalized after
 interpolation. This means displacement near high base mesh curvature will
 produce quite different results.
 
-The
-`VkAccelerationStructureTrianglesDisplacementMicromapNV::displacementVectorFormat`
-value must be fp16 (`VK_FORMAT_R16G16B16A16_SFLOAT`), which is one surprising
-step. It would be more convenient to use normals directly with fp32
-(`VK_FORMAT_R32G32B32_SFLOAT`).
-
 [^1]: Theo Thonat, Francois Beaune, Xin Sun, Nathan Carr, and Tamy Boubekeur.
     2021. Tessellation-free displacement mapping for ray tracing. ACM Trans.
     Graph. 40, 6, Article 282 (December 2021)<br/>

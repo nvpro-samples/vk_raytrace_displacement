@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2023 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2023-2024 NVIDIA CORPORATION & AFFILIATES.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -23,8 +23,15 @@ set(SOURCE_FILES
   src/raytracing_vk.hpp
   )
 
-file(GLOB GLSL_FILES shaders/*.*)
-source_group("Shaders" FILES ${GLSL_FILES})
+# GLSL sources - nvpro_core expects absolute paths
+set(GLSL_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/shaders)
+set(GLSL_FILES
+  ${CMAKE_CURRENT_SOURCE_DIR}/shaders/animate_heightmap.comp
+  ${CMAKE_CURRENT_SOURCE_DIR}/shaders/pathtrace.rchit
+  ${CMAKE_CURRENT_SOURCE_DIR}/shaders/pathtrace.rgen
+  ${CMAKE_CURRENT_SOURCE_DIR}/shaders/pathtrace.rmiss
+  )
+file(GLOB GLSL_HEADERS ${CMAKE_CURRENT_SOURCE_DIR}/shaders/*.h)
 
 # Look for nvpro_core 1) as a sub-folder 2) at some other locations
 if(NOT BASE_DIRECTORY)
@@ -62,6 +69,17 @@ _add_nvpro_core_lib()
 
 add_subdirectory(external/heightmap_rtx)
 
+# Compile shaders to Spir-V, encoded in C header files
+compile_glsl(
+  SOURCE_FILES ${GLSL_FILES}
+  HEADER_FILES ${GLSL_HEADERS}
+  DST "${CMAKE_CURRENT_BINARY_DIR}/spirv/generated_spirv"
+  VULKAN_TARGET "vulkan1.3"
+  HEADER ON
+  DEPENDENCY ON
+  FLAGS "-I${GLSL_INCLUDE_DIR}" "-I${BASE_DIRECTORY}/nvpro_core" -g
+  )
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -70,6 +88,7 @@ add_executable(${SAMPLE_EXECUTABLE}
   ${COMMON_SOURCE_FILES}
   ${PACKAGE_SOURCE_FILES})
 
+target_include_directories(${SAMPLE_EXECUTABLE} PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/spirv)
 target_link_libraries(${SAMPLE_EXECUTABLE} nvpro_core heightmap_rtx ${PLATFORM_LIBRARIES})
 target_link_libraries(${SAMPLE_EXECUTABLE} debug ${LIBRARIES_DEBUG})
 target_link_libraries(${SAMPLE_EXECUTABLE} optimized ${LIBRARIES_OPTIMIZED})
@@ -85,13 +104,9 @@ target_compile_definitions(${SAMPLE_EXECUTABLE} PRIVATE
 # Defines executable install() targets
 _finalize_target(${SAMPLE_EXECUTABLE})
 
-# Install shaders, including some shared headers from nvpro_core. Unlike some
-# samples, these are loaded at runtime and not embedded in the binary
-file(GLOB NVPRO_CORE_GLSL_FILES ${BASE_DIRECTORY}/nvpro_core/nvvkhl/shaders/*)
-install(FILES ${GLSL_FILES} CONFIGURATIONS Release DESTINATION "bin_${ARCH}/GLSL_${SAMPLE_EXECUTABLE}")
-install(FILES ${GLSL_FILES} CONFIGURATIONS Debug DESTINATION "bin_${ARCH}_debug/GLSL_${SAMPLE_EXECUTABLE}")
-install(FILES ${NVPRO_CORE_GLSL_FILES} CONFIGURATIONS Release DESTINATION "bin_${ARCH}/GLSL_${SAMPLE_EXECUTABLE}/nvvkhl/shaders")
-install(FILES ${NVPRO_CORE_GLSL_FILES} CONFIGURATIONS Debug DESTINATION "bin_${ARCH}_debug/GLSL_${SAMPLE_EXECUTABLE}/nvvkhl/shaders")
+# Add shaders so they show in the VS project
+target_sources(${SAMPLE_EXECUTABLE} PRIVATE ${GLSL_FILES} ${GLSL_HEADERS})
+source_group("Shaders" FILES ${GLSL_FILES} ${GLSL_HEADERS})
 
 # Debug in the source directory to avoid having a set of relative shader include
 # paths just for debugging with visual studio
