@@ -398,9 +398,15 @@ public:
     m_app    = app;
     m_device = m_app->getDevice();
 
-    m_dutil             = std::make_unique<nvvk::DebugUtil>(m_device);                    // Debug utility
-    m_alloc             = std::make_unique<nvvkhl::AllocVma>(m_app->getContext().get());  // Allocator
-    m_staticCommandPool = std::make_unique<nvvk::CommandPool>(m_device, m_app->getQueueGCT().queueIndex);
+    VmaAllocatorCreateInfo allocator_info = {};
+    allocator_info.physicalDevice         = app->getPhysicalDevice();
+    allocator_info.device                 = app->getDevice();
+    allocator_info.instance               = app->getInstance();
+    allocator_info.flags                  = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
+
+    m_dutil             = std::make_unique<nvvk::DebugUtil>(m_device);         // Debug utility
+    m_alloc             = std::make_unique<nvvkhl::AllocVma>(allocator_info);  // Allocator
+    m_staticCommandPool = std::make_unique<nvvk::CommandPool>(m_device, m_app->getQueue(0).queueIndex);
     m_rtContext         = {m_device, m_alloc.get(), nullptr, [](VkResult result) { NVVK_CHECK(result); }};
     m_rtScratchBuffer   = std::make_unique<rt::ScratchBuffer>(m_rtContext);
 
@@ -412,7 +418,7 @@ public:
     vkGetPhysicalDeviceProperties2(m_app->getPhysicalDevice(), &prop2);
 
     // Create utilities to create BLAS/TLAS and the Shader Binding Table (SBT)
-    int32_t gct_queue_index = m_app->getContext()->m_queueGCT.familyIndex;
+    int32_t gct_queue_index = m_app->getQueue(0).familyIndex;
     m_sbt.setup(m_device, gct_queue_index, m_alloc.get(), m_rtProperties);
 
     // Create resources
@@ -576,7 +582,7 @@ public:
           .commandBufferCount = 1,
           .pCommandBuffers    = &m_cmdHrtxUpdate,
       };
-      vkQueueSubmit(m_app->getContext()->m_queueGCT.queue, 1, &submit, VK_NULL_HANDLE);
+      vkQueueSubmit(m_app->getQueue(0).queue, 1, &submit, VK_NULL_HANDLE);
 
       // Rebuild the BLAS for the heightmap. The TLAS then needs updating too,
       // but not the other static geometry. Note that the above animation and
@@ -673,8 +679,8 @@ private:
     // Rendering image targets
     m_viewSize = size;
     m_gBuffer  = std::make_unique<nvvkhl::GBuffer>(m_device, m_alloc.get(),
-                                                  VkExtent2D{static_cast<uint32_t>(size.x), static_cast<uint32_t>(size.y)},
-                                                  m_colorFormat, m_depthFormat);
+                                                   VkExtent2D{static_cast<uint32_t>(size.x), static_cast<uint32_t>(size.y)},
+                                                   m_colorFormat, m_depthFormat);
   }
 
   // Create all Vulkan buffer data
@@ -1126,30 +1132,30 @@ private:
 int main(int argc, char** argv)
 {
   nvvkhl::ApplicationCreateInfo spec;
-  spec.name             = PROJECT_NAME " Example";
-  spec.vSync            = false;
-  spec.vkSetup          = nvvk::ContextCreateInfo(false);  // #MICROMESH cannot have validation layers (crash)
-  spec.vkSetup.apiMajor = 1;
-  spec.vkSetup.apiMinor = 3;
+  spec.name                       = PROJECT_NAME " Example";
+  spec.vSync                      = false;
+  nvvk::ContextCreateInfo vkSetup = nvvk::ContextCreateInfo(false);  // #MICROMESH cannot have validation layers (crash)
+  vkSetup.apiMajor                = 1;
+  vkSetup.apiMinor                = 3;
 
-  spec.vkSetup.addDeviceExtension(VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
+  vkSetup.addDeviceExtension(VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
   // #VKRay: Activate the ray tracing extension
   VkPhysicalDeviceAccelerationStructureFeaturesKHR accel_feature{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR};
-  spec.vkSetup.addDeviceExtension(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME, false, &accel_feature);  // To build acceleration structures
+  vkSetup.addDeviceExtension(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME, false, &accel_feature);  // To build acceleration structures
   VkPhysicalDeviceRayTracingPipelineFeaturesKHR rt_pipeline_feature{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR};
-  spec.vkSetup.addDeviceExtension(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME, false, &rt_pipeline_feature);  // To use vkCmdTraceRaysKHR
-  spec.vkSetup.addDeviceExtension(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);  // Required by ray tracing pipeline
-  spec.vkSetup.addDeviceExtension(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME);
+  vkSetup.addDeviceExtension(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME, false, &rt_pipeline_feature);  // To use vkCmdTraceRaysKHR
+  vkSetup.addDeviceExtension(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);  // Required by ray tracing pipeline
+  vkSetup.addDeviceExtension(VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME);
   VkPhysicalDeviceRayTracingPositionFetchFeaturesKHR rt_position_fetch{
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_POSITION_FETCH_FEATURES_KHR};
-  spec.vkSetup.addDeviceExtension(VK_KHR_RAY_TRACING_POSITION_FETCH_EXTENSION_NAME, false, &rt_position_fetch);
+  vkSetup.addDeviceExtension(VK_KHR_RAY_TRACING_POSITION_FETCH_EXTENSION_NAME, false, &rt_position_fetch);
 
   // #MICROMESH
   static VkPhysicalDeviceOpacityMicromapFeaturesEXT mm_opacity_features = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_OPACITY_MICROMAP_FEATURES_EXT};
   static VkPhysicalDeviceDisplacementMicromapFeaturesNV mm_displacement_features = {
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DISPLACEMENT_MICROMAP_FEATURES_NV};
-  spec.vkSetup.addDeviceExtension(VK_EXT_OPACITY_MICROMAP_EXTENSION_NAME, true, &mm_opacity_features);
-  spec.vkSetup.addDeviceExtension(VK_NV_DISPLACEMENT_MICROMAP_EXTENSION_NAME, true, &mm_displacement_features);
+  vkSetup.addDeviceExtension(VK_EXT_OPACITY_MICROMAP_EXTENSION_NAME, true, &mm_opacity_features);
+  vkSetup.addDeviceExtension(VK_NV_DISPLACEMENT_MICROMAP_EXTENSION_NAME, true, &mm_displacement_features);
   // Disable error messages introduced by micromesh
   spec.ignoreDbgMessages.push_back(0x901f59ec);  // Unknown extension
   spec.ignoreDbgMessages.push_back(0xdd73dbcf);  // Unknown structure
@@ -1166,17 +1172,34 @@ int main(int argc, char** argv)
     ImGui::DockBuilderDockWindow("Heightmap", heightmapID);
   };
 
+  // Display extension
+  vkSetup.deviceExtensions.emplace_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+  vkSetup.instanceExtensions.emplace_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+  nvvkhl::addSurfaceExtensions(vkSetup.instanceExtensions);
+
+  // Creating the Vulkan context
+  auto m_context = std::make_shared<nvvk::Context>();
+  m_context->init(vkSetup);
+
+  // Application Vulkan setup
+  spec.instance       = m_context->m_instance;
+  spec.device         = m_context->m_device;
+  spec.physicalDevice = m_context->m_physicalDevice;
+  spec.queues.push_back({m_context->m_queueGCT.familyIndex, m_context->m_queueGCT.queueIndex, m_context->m_queueGCT.queue});
+  spec.queues.push_back({m_context->m_queueC.familyIndex, m_context->m_queueC.queueIndex, m_context->m_queueC.queue});
+  spec.queues.push_back({m_context->m_queueT.familyIndex, m_context->m_queueT.queueIndex, m_context->m_queueT.queue});
+
   // Create the application
   auto app = std::make_unique<nvvkhl::Application>(spec);
 
   // #MICROMESH
-  if(!app->getContext()->hasDeviceExtension(VK_EXT_OPACITY_MICROMAP_EXTENSION_NAME))
+  if(!mm_opacity_features.micromap)
   {
     LOGE("ERROR: Micro-Mesh not supported");
     exit(1);
   }
 
-  if(!app->getContext()->hasDeviceExtension(VK_NV_DISPLACEMENT_MICROMAP_EXTENSION_NAME))
+  if(!mm_displacement_features.displacementMicromap)
   {
     LOGE("ERROR: Micro-Mesh displacement not supported");
     exit(1);
@@ -1195,7 +1218,7 @@ int main(int argc, char** argv)
 
   app->run();
 
-  vkDeviceWaitIdle(app->getContext()->m_device);
+  vkDeviceWaitIdle(app->getDevice());
   app.reset();
 
   return test->errorCode();
