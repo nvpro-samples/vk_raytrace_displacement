@@ -1156,13 +1156,6 @@ int main(int argc, char** argv)
       VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DISPLACEMENT_MICROMAP_FEATURES_NV};
   vkSetup.addDeviceExtension(VK_EXT_OPACITY_MICROMAP_EXTENSION_NAME, true, &mm_opacity_features);
   vkSetup.addDeviceExtension(VK_NV_DISPLACEMENT_MICROMAP_EXTENSION_NAME, true, &mm_displacement_features);
-  // Disable error messages introduced by micromesh
-  spec.ignoreDbgMessages.push_back(0x901f59ec);  // Unknown extension
-  spec.ignoreDbgMessages.push_back(0xdd73dbcf);  // Unknown structure
-  spec.ignoreDbgMessages.push_back(0xba164058);  // Unknown flag  vkGetAccelerationStructureBuildSizesKHR:
-  spec.ignoreDbgMessages.push_back(0x22d5bbdc);  // Unknown flag  vkCreateRayTracingPipelinesKHR
-  spec.ignoreDbgMessages.push_back(0x27112e51);  // Unknown flag  vkCreateBuffer
-  spec.ignoreDbgMessages.push_back(0x79de34d4);  // Unknown VK_NV_displacement_micromesh, VK_NV_opacity_micromesh
 
   // UI default docking
   spec.dockSetup = [](ImGuiID viewportID) {
@@ -1180,6 +1173,13 @@ int main(int argc, char** argv)
   // Creating the Vulkan context
   auto m_context = std::make_shared<nvvk::Context>();
   m_context->init(vkSetup);
+  // Disable error messages introduced by micromesh
+  m_context->ignoreDebugMessage(0x901f59ec);  // Unknown extension
+  m_context->ignoreDebugMessage(0xdd73dbcf);  // Unknown structure
+  m_context->ignoreDebugMessage(0xba164058);  // Unknown flag  vkGetAccelerationStructureBuildSizesKHR:
+  m_context->ignoreDebugMessage(0x22d5bbdc);  // Unknown flag  vkCreateRayTracingPipelinesKHR
+  m_context->ignoreDebugMessage(0x27112e51);  // Unknown flag  vkCreateBuffer
+  m_context->ignoreDebugMessage(0x79de34d4);  // Unknown VK_NV_displacement_micromesh, VK_NV_opacity_micromesh
 
   // Application Vulkan setup
   spec.instance       = m_context->m_instance;
