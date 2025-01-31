@@ -1,3 +1,9 @@
+# DEPRECATED
+
+The **NVIDIA RTX Mega Geometry** technology supercedes displaced Micro-Meshes. This repository is archived as result.
+
+Please have a look at this new sample [vk_tessellated_clusters](https://github.com/nvpro-samples/vk_tessellated_clusters) that showcases real-time adaptive tessellation with displacement for ray tracing and rasterization.
+
 # vk_raytrace_displacement
 
 ![](doc/preview.jpg)

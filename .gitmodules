@@ -1,3 +1,8 @@
 [submodule "external/heightmap_rtx"]
 	path = external/heightmap_rtx
 	url = https://github.com/NVIDIAGameWorks/heightmap_rtx.git
+
+[submodule "nvpro_core"]
+	path = nvpro_core
+	url = https://github.com/nvpro-samples/nvpro_core.git
+	branch = master
